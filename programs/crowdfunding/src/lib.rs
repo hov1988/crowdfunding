@@ -6,11 +6,19 @@ declare_id!("7zT6hzi2QoHtZrhsBqoapB5nEX94SBvoX21awsELDdGx");
 pub mod crowdfunding {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
-        msg!("Greetings from: {:?}", ctx.program_id);
+    pub fn create(
+        _ctx: Context<Create>,
+        _name: String,
+        _description: String,
+    ) -> Result<()> {
         Ok(())
     }
 }
 
 #[derive(Accounts)]
-pub struct Initialize {}
+pub struct Create<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
