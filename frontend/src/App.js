@@ -1,15 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { Connection, PublicKey, clusterApiUrl } from "@solana/web3.js";
-import { Program, AnchorProvider, web3, BN } from "@coral-xyz/anchor"; // Импортируем BN и web3
+import { Program, AnchorProvider, web3, utils, BN } from "@coral-xyz/anchor";
 import { Buffer } from "buffer";
 import idl from "./idl.json";
 import "./App.css";
 
-// Фикс для работы Buffer в браузере
 window.Buffer = Buffer;
 
-const { SystemProgram, LAMPORTS_PER_SOL } = web3; // Вытаскиваем нужные константы
-const programID = new PublicKey(idl.address);
+const programID = new PublicKey("53VNkdZZAGPEHRVmx9Hpvm4XcDMiqzGfZquaUQqhwv66");
 const network = clusterApiUrl("devnet");
 const opts = { preflightCommitment: "processed" };
 
@@ -17,60 +15,56 @@ const App = () => {
   const [walletAddress, setWalletAddress] = useState(null);
   const [campaigns, setCampaigns] = useState([]);
 
-  const checkIfWalletConnected = async () => {
-    try {
-      const { solana } = window;
-      if (solana && solana.isPhantom) {
-        const response = await solana.connect({ onlyIfTrusted: true });
-        setWalletAddress(response.publicKey.toString());
-        await getCampaigns();
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  };
+  const connection = useMemo(() => new Connection(network, opts.preflightCommitment), []);
 
-  const connectWallet = async () => {
-    const { solana } = window;
-    if (solana) {
-      const response = await solana.connect();
-      setWalletAddress(response.publicKey.toString());
-    }
+  const getProvider = () => {
+    if (!window.solana) return null;
+    return new AnchorProvider(connection, window.solana, opts);
   };
 
   const getProgram = () => {
-    const connection = new Connection(network, opts.preflightCommitment);
-    const provider = new AnchorProvider(connection, window.solana, opts);
+    const provider = getProvider();
+    if (!provider) return null;
     return new Program(idl, provider);
   };
 
-  // 1. Создание кампании
+  const getCampaignPDA = (userPublicKey, name) => {
+    return PublicKey.findProgramAddressSync(
+      [
+        utils.bytes.utf8.encode("campaign"),
+        userPublicKey.toBuffer(),
+        utils.bytes.utf8.encode(name),
+      ],
+      programID
+    )[0];
+  };
+
   const createCampaign = async (name, description) => {
     try {
       const program = getProgram();
-      const campaignKeypair = web3.Keypair.generate();
+      const provider = getProvider();
+      const campaignPDA = getCampaignPDA(provider.publicKey, name);
 
       await program.methods
         .create(name, description)
         .accounts({
-          campaign: campaignKeypair.publicKey,
-          user: program.provider.publicKey,
-          systemProgram: SystemProgram.programId,
+          campaign: campaignPDA,
+          user: provider.publicKey,
+          systemProgram: web3.SystemProgram.programId,
         })
-        .signers([campaignKeypair])
         .rpc();
 
       alert("Campaign created!");
-      getCampaigns();
+      await getCampaigns();
     } catch (err) {
       console.error("Error creating campaign:", err);
     }
   };
 
-  // 2. Получение списка кампаний
   const getCampaigns = async () => {
+    const program = getProgram();
+    if (!program) return;
     try {
-      const program = getProgram();
       const accounts = await program.account.campaign.all();
       setCampaigns(accounts);
     } catch (err) {
@@ -78,80 +72,98 @@ const App = () => {
     }
   };
 
-  // 3. Донат
   const donate = async (campaignPubKey, amount) => {
     try {
       const program = getProgram();
-      // Испольуем BN напрямую, как импортировали выше
-      const amountBN = new BN(amount * LAMPORTS_PER_SOL);
+      const amountBN = new BN(amount * web3.LAMPORTS_PER_SOL);
 
       await program.methods
         .donate(amountBN)
         .accounts({
           campaign: campaignPubKey,
           user: program.provider.publicKey,
+          systemProgram: web3.SystemProgram.programId,
         })
         .rpc();
 
       alert("Donated!");
-      getCampaigns();
+      await getCampaigns();
     } catch (err) {
       console.error("Error donating:", err);
     }
   };
 
-  // 4. Вывод средств
   const withdraw = async (campaignPubKey, amount) => {
     try {
       const program = getProgram();
-      const amountBN = new BN(amount * LAMPORTS_PER_SOL);
+      const amountBN = new BN(amount * web3.LAMPORTS_PER_SOL);
 
       await program.methods
         .withdraw(amountBN)
         .accounts({
           campaign: campaignPubKey,
-          user: program.provider.publicKey,
+          admin: program.provider.publicKey,
         })
         .rpc();
 
       alert("Withdraw success!");
-      getCampaigns();
+      await getCampaigns();
     } catch (err) {
       console.error("Error withdrawing:", err);
     }
   };
 
+  const connectWallet = async () => {
+    const { solana } = window;
+    if (solana) {
+      try {
+        const response = await solana.connect();
+        setWalletAddress(response.publicKey.toString());
+      } catch (err) {
+        console.error("Wallet connection failed", err);
+      }
+    } else {
+      alert("Solana object not found! Get a Phantom Wallet 👻");
+    }
+  };
+
   useEffect(() => {
-    checkIfWalletConnected();
+    const onLoad = async () => {
+      if (window.solana?.isPhantom) {
+        const response = await window.solana.connect({ onlyIfTrusted: true });
+        setWalletAddress(response.publicKey.toString());
+      }
+    };
+    window.addEventListener("load", onLoad);
+    return () => window.removeEventListener("load", onLoad);
   }, []);
+
+  useEffect(() => {
+    if (walletAddress) {
+      getCampaigns();
+    }
+  }, [walletAddress]);
 
   return (
     <div className="App">
       {!walletAddress ? (
-        <button onClick={connectWallet}>Connect Phantom Wallet</button>
+        <button onClick={connectWallet}>Connect Wallet</button>
       ) : (
         <div>
-          <p>Connected: {walletAddress}</p>
-          <div style={{ marginBottom: "20px" }}>
-            <button onClick={() => createCampaign("My Campaign", "Please help!")}>
-              Create New Campaign
-            </button>
-            <button onClick={getCampaigns}>Refresh List</button>
-          </div>
-
-          <div className="list">
+          <p>Wallet: {walletAddress}</p>
+          <button onClick={() => createCampaign("Help for Cats", "Buy food")}>
+            Create My Campaign
+          </button>
+          
+          <div style={{ marginTop: "20px" }}>
             {campaigns.map((c) => (
-              <div key={c.publicKey.toString()} style={{ border: "1px solid #ccc", padding: "10px", margin: "10px" }}>
-                <h3>{c.account.name}</h3>
-                <p>{c.account.description}</p>
-                <p>Raised: {(c.account.amountDonated.toNumber() / LAMPORTS_PER_SOL).toFixed(4)} SOL</p>
-                
-                <button onClick={() => donate(c.publicKey, 0.01)}>Donate 0.01 SOL</button>
-                
+              <div key={c.publicKey.toString()} style={{ border: "1px solid gray", padding: "10px", margin: "10px" }}>
+                <h4>Name: {c.account.name}</h4>
+                <p>Desc: {c.account.description}</p>
+                <p>Donated: {(c.account.amountDonated.toNumber() / web3.LAMPORTS_PER_SOL).toFixed(4)} SOL</p>
+                <button onClick={() => donate(c.publicKey, 0.1)}>Donate 0.1 SOL</button>
                 {walletAddress === c.account.admin.toString() && (
-                  <button onClick={() => withdraw(c.publicKey, 0.01)} style={{ marginLeft: "10px", color: "red" }}>
-                    Withdraw 0.01 SOL
-                  </button>
+                  <button onClick={() => withdraw(c.publicKey, 0.05)}>Withdraw 0.05 SOL</button>
                 )}
               </div>
             ))}
