@@ -34,44 +34,61 @@ pub mod crowdfunding {
         **user.to_account_info().try_borrow_mut_lamports()? += amount;  
         Ok(())
     }
+
+    pub fn donate(ctx: Context<Withdraw>, amount: u64) -> ProgramResult {
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &ctx.accounts.user.key(), 
+            &ctx.accounts.campaign.key(), 
+            amount
+        );
+        anchor_lang::solana_program::program::invoke(
+            &ix, 
+            &[
+                ctx.accounts.user.to_account_info(),
+                ctx.accounts.campaign.to_account_info()
+            ]
+        );
+        (&mut ctx.accounts.campaign).amount_donated += amount;
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
 pub struct Create<'info> {
-    #[account(mut)]
-    pub user: Signer<'info>,
-
     #[account(
         init,
         payer = user,
-        space = 8 + Campaign::INIT_SPACE,
+        space = 9000,
         seeds = [b"CAMPAIGN_DEMO", user.key().as_ref()],
-        bump
-    )]
+        bump)]
     pub campaign: Account<'info, Campaign>,
-
+    #[account(mut)]
+    pub user: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
 pub struct Withdraw<'info> {
     #[account(mut)]
-    pub user: Signer<'info>,
-    #[account(mut)]
     pub campaign: Account<'info, Campaign>,
+    #[account(mut)]
+    pub user: Signer<'info>
 }
 
+#[derive(Accounts)]
+pub struct Donate<'info> {
+    #[account(mut)]
+    pub account: Account<'info, Campaign>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub system_program: Program<'info, System>
+}
 
 #[account]
-#[derive(InitSpace)]
 pub struct Campaign {
     pub admin: Pubkey,
-
-    #[max_len(64)]
     pub name: String,
-
-    #[max_len(256)]
     pub description: String,
-
-    pub amount_donated: i64,
+    pub amount_donated: u64,
 }
