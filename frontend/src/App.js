@@ -39,14 +39,29 @@ const App = () => {
     )[0];
   };
 
-  const createCampaign = async (name, description) => {
+  // Новая функция для расчета PDA вклада
+  const getContributorPDA = (campaignPubKey, userPublicKey) => {
+    return PublicKey.findProgramAddressSync(
+      [
+        utils.bytes.utf8.encode("contribution"),
+        campaignPubKey.toBuffer(),
+        userPublicKey.toBuffer(),
+      ],
+      programID
+    )[0];
+  };
+
+  const createCampaign = async (name, description, targetAmountSol, durationSeconds) => {
     try {
       const program = getProgram();
       const provider = getProvider();
       const campaignPDA = getCampaignPDA(provider.publicKey, name);
 
+      const targetAmount = new BN(targetAmountSol * web3.LAMPORTS_PER_SOL);
+      const duration = new BN(durationSeconds);
+
       await program.methods
-        .create(name, description)
+        .create(name, description, targetAmount, duration)
         .accounts({
           campaign: campaignPDA,
           user: provider.publicKey,
@@ -75,13 +90,18 @@ const App = () => {
   const donate = async (campaignPubKey, amount) => {
     try {
       const program = getProgram();
+      const provider = getProvider();
       const amountBN = new BN(amount * web3.LAMPORTS_PER_SOL);
+      
+      // Находим PDA записи о вкладе
+      const contributorPDA = getContributorPDA(campaignPubKey, provider.publicKey);
 
       await program.methods
         .donate(amountBN)
         .accounts({
           campaign: campaignPubKey,
-          user: program.provider.publicKey,
+          contributorRecord: contributorPDA,
+          user: provider.publicKey,
           systemProgram: web3.SystemProgram.programId,
         })
         .rpc();
@@ -90,6 +110,30 @@ const App = () => {
       await getCampaigns();
     } catch (err) {
       console.error("Error donating:", err);
+    }
+  };
+
+  const refund = async (campaignPubKey) => {
+    try {
+      const program = getProgram();
+      const provider = getProvider();
+      const contributorPDA = getContributorPDA(campaignPubKey, provider.publicKey);
+
+      await program.methods
+        .refund()
+        .accounts({
+          campaign: campaignPubKey,
+          contributorRecord: contributorPDA,
+          user: provider.publicKey,
+          systemProgram: web3.SystemProgram.programId,
+        })
+        .rpc();
+
+      alert("Refund success!");
+      await getCampaigns();
+    } catch (err) {
+      console.error("Error refunding:", err);
+      alert("Refund failed: Check if campaign ended and target wasn't reached.");
     }
   };
 
@@ -110,6 +154,7 @@ const App = () => {
       await getCampaigns();
     } catch (err) {
       console.error("Error withdrawing:", err);
+      alert("Withdraw failed: Maybe target not reached?");
     }
   };
 
@@ -151,22 +196,42 @@ const App = () => {
       ) : (
         <div>
           <p>Wallet: {walletAddress}</p>
-          <button onClick={() => createCampaign("Help for Cats", "Buy food")}>
-            Create My Campaign
+          {/* Пример: цель 5 SOL, длительность 1 час (3600 сек) */}
+          <button onClick={() => createCampaign("Help for Cats", "Buy food", 5, 3600)}>
+            Create Campaign (Goal 5 SOL)
           </button>
           
           <div style={{ marginTop: "20px" }}>
-            {campaigns.map((c) => (
-              <div key={c.publicKey.toString()} style={{ border: "1px solid gray", padding: "10px", margin: "10px" }}>
-                <h4>Name: {c.account.name}</h4>
-                <p>Desc: {c.account.description}</p>
-                <p>Donated: {(c.account.amountDonated.toNumber() / web3.LAMPORTS_PER_SOL).toFixed(4)} SOL</p>
-                <button onClick={() => donate(c.publicKey, 0.1)}>Donate 0.1 SOL</button>
-                {walletAddress === c.account.admin.toString() && (
-                  <button onClick={() => withdraw(c.publicKey, 0.05)}>Withdraw 0.05 SOL</button>
-                )}
-              </div>
-            ))}
+            {campaigns.map((c) => {
+              const isFinished = c.account.deadline.toNumber() < Math.floor(Date.now() / 1000);
+              const targetReached = c.account.amountDonated.gte(c.account.targetAmount);
+
+              return (
+                <div key={c.publicKey.toString()} style={{ border: "1px solid gray", padding: "10px", margin: "10px" }}>
+                  <h4>Name: {c.account.name}</h4>
+                  <p>Desc: {c.account.description}</p>
+                  <p>Target: {(c.account.targetAmount.toNumber() / web3.LAMPORTS_PER_SOL).toFixed(2)} SOL</p>
+                  <p>Donated: {(c.account.amountDonated.toNumber() / web3.LAMPORTS_PER_SOL).toFixed(4)} SOL</p>
+                  <p>Deadline: {new Date(c.account.deadline.toNumber() * 1000).toLocaleString()}</p>
+                  
+                  {!isFinished && (
+                    <button onClick={() => donate(c.publicKey, 0.1)}>Donate 0.1 SOL</button>
+                  )}
+
+                  {isFinished && !targetReached && (
+                    <button onClick={() => refund(c.publicKey)} style={{ backgroundColor: "orange" }}>
+                      Get Refund
+                    </button>
+                  )}
+
+                  {walletAddress === c.account.admin.toString() && targetReached && (
+                    <button onClick={() => withdraw(c.publicKey, 0.05)} style={{ backgroundColor: "green", color: "white" }}>
+                      Withdraw 0.05 SOL
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

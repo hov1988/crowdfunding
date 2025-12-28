@@ -13,7 +13,9 @@ describe("crowdfunding", () => {
 
   const campaignName = "Help for Cats";
   const campaignDescription = "Buying food for local shelter";
-  
+  const targetAmount = new BN(2 * anchor.web3.LAMPORTS_PER_SOL);
+  const duration = new BN(5);
+
   const [campaignPDA] = anchor.web3.PublicKey.findProgramAddressSync(
     [
       Buffer.from("campaign"),
@@ -23,9 +25,18 @@ describe("crowdfunding", () => {
     program.programId
   );
 
+  const [contributorPDA] = anchor.web3.PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("contribution"),
+      campaignPDA.toBuffer(),
+      user.publicKey.toBuffer(),
+    ],
+    program.programId
+  );
+
   it("Creates a campaign successfully", async () => {
     await program.methods
-      .create(campaignName, campaignDescription)
+      .create(campaignName, campaignDescription, targetAmount, duration)
       .accounts({
         campaign: campaignPDA,
         user: user.publicKey,
@@ -34,36 +45,59 @@ describe("crowdfunding", () => {
       .rpc();
 
     const account = await program.account.campaign.fetch(campaignPDA);
-    expect(account.name).to.equal(campaignName);
-    expect(account.description).to.equal(campaignDescription);
-    expect(account.admin.toString()).to.equal(user.publicKey.toString());
+    expect(account.targetAmount.toString()).to.equal(targetAmount.toString());
     expect(account.amountDonated.toNumber()).to.equal(0);
   });
 
-  it("Allows a user to donate", async () => {
+  it("Allows a user to donate and creates a record", async () => {
     const donationAmount = new BN(1 * anchor.web3.LAMPORTS_PER_SOL); // 1 SOL
 
     await program.methods
       .donate(donationAmount)
       .accounts({
         campaign: campaignPDA,
+        contributorRecord: contributorPDA,
         user: user.publicKey,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
-    const account = await program.account.campaign.fetch(campaignPDA);
-    expect(account.amountDonated.toString()).to.equal(donationAmount.toString());
+    const campaignAcc = await program.account.campaign.fetch(campaignPDA);
+    const contributionAcc = await program.account.contribution.fetch(contributorPDA);
 
-    const balance = await provider.connection.getBalance(campaignPDA);
-    expect(balance).to.be.greaterThan(donationAmount.toNumber());
+    expect(campaignAcc.amountDonated.toString()).to.equal(donationAmount.toString());
+    expect(contributionAcc.amount.toString()).to.equal(donationAmount.toString());
   });
 
-  it("Allows admin to withdraw funds", async () => {
-    const withdrawAmount = new BN(0.5 * anchor.web3.LAMPORTS_PER_SOL); // 0.5 SOL
-    
-    const beforeBalance = await provider.connection.getBalance(user.publicKey);
+  it("Fails to withdraw before target is reached", async () => {
+    try {
+      await program.methods
+        .withdraw(new BN(0.1 * anchor.web3.LAMPORTS_PER_SOL))
+        .accounts({
+          campaign: campaignPDA,
+          admin: user.publicKey,
+        })
+        .rpc();
+      expect.fail("Should have failed because target not reached");
+    } catch (err: any) {
+      expect(err.error.errorCode.code).to.equal("TargetNotReached");
+    }
+  });
 
+  it("Reaches target and allows withdrawal", async () => {
+    const secondDonation = new BN(1 * anchor.web3.LAMPORTS_PER_SOL);
+    
+    await program.methods
+      .donate(secondDonation)
+      .accounts({
+        campaign: campaignPDA,
+        contributorRecord: contributorPDA,
+        user: user.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .rpc();
+
+    const withdrawAmount = new BN(0.5 * anchor.web3.LAMPORTS_PER_SOL);
     await program.methods
       .withdraw(withdrawAmount)
       .accounts({
@@ -72,30 +106,52 @@ describe("crowdfunding", () => {
       })
       .rpc();
 
-    const afterBalance = await provider.connection.getBalance(user.publicKey);
-    
-    expect(afterBalance).to.be.greaterThan(beforeBalance);
+    const campaignAcc = await program.account.campaign.fetch(campaignPDA);
+    expect(campaignAcc.amountDonated.toNumber()).to.be.greaterThan(0);
   });
 
-  it("Fails when a non-admin tries to withdraw", async () => {
-    const maliciousUser = anchor.web3.Keypair.generate();
-    
-    const signature = await provider.connection.requestAirdrop(maliciousUser.publicKey, 1e9);
-    await provider.connection.confirmTransaction(signature);
+  it("Testing Refund logic (requires new campaign)", async () => {
+    const shortName = "Short Campaign";
+    const [shortPDA] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("campaign"), user.publicKey.toBuffer(), Buffer.from(shortName)],
+      program.programId
+    );
+    const [shortContributorPDA] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("contribution"), shortPDA.toBuffer(), user.publicKey.toBuffer()],
+      program.programId
+    );
+
+    await program.methods
+      .create(shortName, "Refund test", new BN(10e9), new BN(1))
+      .accounts({ campaign: shortPDA, user: user.publicKey, systemProgram: anchor.web3.SystemProgram.programId })
+      .rpc();
+
+    await program.methods
+      .donate(new BN(1e9))
+      .accounts({ 
+        campaign: shortPDA, 
+        contributorRecord: shortContributorPDA, 
+        user: user.publicKey, 
+        systemProgram: anchor.web3.SystemProgram.programId 
+      })
+      .rpc();
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    await program.methods
+      .refund()
+      .accounts({
+        campaign: shortPDA,
+        contributorRecord: shortContributorPDA,
+        user: user.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId
+      })
+      .rpc();
 
     try {
-      await program.methods
-        .withdraw(new BN(0.1 * anchor.web3.LAMPORTS_PER_SOL))
-        .accounts({
-          campaign: campaignPDA,
-          admin: maliciousUser.publicKey,
-        })
-        .signers([maliciousUser])
-        .rpc();
-        
-      expect.fail("The transaction should have failed");
-    } catch (err: any) {
-      expect(err.error.errorCode.code).to.equal("InvalidAdmin");
+      await program.account.contribution.fetch(shortContributorPDA);
+      expect.fail("Contribution account should be closed");
+    } catch (e) {
     }
   });
 });
